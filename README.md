@@ -27,7 +27,28 @@ You can enter "n [k]" to start a new game with a different word length `k`.  Or 
 
 The C++ version of this tool was used as a baseline for the Rust version.  It was a naive implementation that kept track of the letters available at each position in the word. 
 
-The Rust version was created using Claude Code with the prompts related to how the C++ program worked.  The end result was an even better application.  It would remove more letters from the pool of possible letters for each position in the word by looking at the list of words and the constraints provided by the user.  
+The Rust version was created using Claude Code with the prompts related to how the C++ program worked.  The end result was an even better application.  It would remove more letters from the pool of possible letters for each position in the word by looking at the list of words and the constraints provided by the user.  For example, guessing "aRose" for the first word results in:
+```
+Wordle solver — 5-letter words, 8943 candidates.
+At the prompt: 'q' quit, 'n' reset, 'n <k>' reset to k letters, or  word [letters]
+  (CAPITALS = right spot, letters after the word = wrong spot.)
+Guess: aRose
+BRICK
+BRILL
+...
+WRUNG
+WRYLY
+Available letters by position:
+   1: BCDFGIKPTW
+   2: R
+   3: IUWY
+   4: BCFGILMNPTVZ
+   5: BDFGHIKLNPTYZ
+68 of 8943 5-letter words remain
+Guess: 
+```
+Based on the constraints and the words in the word list, the only letters remaining at the 3rd position are I, U, W, and Y.  The C++ version would have removed only the A, O, S, and E, leaving 22 letters remaining.
+
 
 ### Why Word Length Options?
 
