@@ -17,10 +17,17 @@
 // of letters after it:
 //   * A CAPITAL letter  -> correct letter, correct position (green). That
 //     position is now pinned to exactly that one letter.
-//   * Any letters typed after the word -> present in the answer but in the
-//     WRONG place (yellow); they are barred from the position(s) they occupy in
-//     `word`.
-//   * Every other (lowercase) letter of `word` -> not in the answer (gray).
+//   * Any letters typed after the word -> present in the answer but in the WRONG
+//     place (yellow). Repeat a letter once per yellow copy: "eerie ee" says two
+//     of that guess's three e's came up yellow.
+//   * Every other (lowercase) letter of `word` -> gray.
+//
+// A lowercase letter is never at the position it occupies in `word` — yellow or
+// gray, it would have been a capital if it were. And because Wordle only greys a
+// copy of a letter once it has run out of them, a single gray copy pins the
+// letter's total: the answer holds exactly as many as the guess just proved green
+// or yellow. Zero for a letter that never lit up; exactly one L for "lAbEL" (one
+// green L, one gray); exactly two e's for "eerie ee" (two yellow, one gray).
 //
 // Example: answer "CRANE", you guess "trace" — 'r','a' green, 'e' yellow,
 // 't','c' gray:   tRAce e
@@ -98,14 +105,15 @@ struct Solver {
     len: usize,
     master: Vec<String>,  // all words of this length, uppercase, alphabetized
     current: Vec<String>, // those still consistent with the clues
-    in_letters: [bool; 26],
-    out_letters: [bool; 26],
     /// For each position, letters that cannot go there.
     wrong_positions: Vec<[bool; 26]>,
     /// For each position, the pinned (green) letter, if known.
     correct_positions: Vec<Option<u8>>,
     /// Minimum number of times each letter must appear.
     total_counts: [usize; 26],
+    /// Maximum number of times each letter may appear. A gray letter drives this
+    /// down; 0 means the letter is absent from the answer entirely.
+    max_counts: [usize; 26],
 }
 
 impl Solver {
@@ -115,11 +123,10 @@ impl Solver {
             len,
             current: master.clone(),
             master,
-            in_letters: [false; 26],
-            out_letters: [false; 26],
             wrong_positions: vec![[false; 26]; len],
             correct_positions: vec![None; len],
             total_counts: [0; 26],
+            max_counts: [len; 26],
         };
         s.reset();
         s
@@ -127,11 +134,10 @@ impl Solver {
 
     /// Forget every clue and restore the full candidate list.
     fn reset(&mut self) {
-        self.in_letters = [false; 26];
-        self.out_letters = [false; 26];
         self.wrong_positions = vec![[false; 26]; self.len];
         self.correct_positions = vec![None; self.len];
         self.total_counts = [0; 26];
+        self.max_counts = [self.len; 26];
         self.current = self.master.clone();
     }
 
@@ -161,17 +167,24 @@ impl Solver {
             return Err("guess must be letters only".into());
         }
 
-        // A new green must not contradict a previously established one.
+        // A new green must not contradict a previously established one, and a
+        // known green must not be typed in lowercase — that would read as gray
+        // and rule out the very letter we already know sits there.
         for i in 0..self.len {
-            if guess[i].is_ascii_uppercase() {
-                if let Some(prev) = self.correct_positions[i] {
-                    if prev != guess[i] {
-                        return Err(format!(
-                            "position {} was already fixed to '{}'",
-                            i + 1,
-                            prev as char
-                        ));
-                    }
+            if let Some(prev) = self.correct_positions[i] {
+                if guess[i].is_ascii_uppercase() && prev != guess[i] {
+                    return Err(format!(
+                        "position {} was already fixed to '{}'",
+                        i + 1,
+                        prev as char
+                    ));
+                }
+                if guess[i].is_ascii_lowercase() && prev == guess[i].to_ascii_uppercase() {
+                    return Err(format!(
+                        "position {} is known to be '{}' — capitalize it",
+                        i + 1,
+                        prev as char
+                    ));
                 }
             }
         }
@@ -179,17 +192,37 @@ impl Solver {
         if wrongs.len() > self.len {
             return Err("too many wrong-position letters".into());
         }
-        for &c in wrongs {
-            if !c.is_ascii_alphabetic() {
-                return Err("wrong-position list must be letters only".into());
+        if !wrongs.iter().all(|b| b.is_ascii_alphabetic()) {
+            return Err("wrong-position list must be letters only".into());
+        }
+
+        // A yellow has to be an actual non-green letter of the guess, and it
+        // can't be claimed more often than the guess has copies left to claim —
+        // "eerie ee" is two of the three e's, "eerie eee" would be all of them,
+        // and "arose aa" is nonsense.
+        let listed = counts_of(wrongs);
+        let mut ungreen = [0usize; 26];
+        for &g in guess {
+            if g.is_ascii_lowercase() {
+                ungreen[idx(g)] += 1;
             }
-            // The letter must appear as a lowercase (non-green) letter in the
-            // guess — you can't call a letter yellow if it isn't there.
-            if !guess.iter().any(|&g| g == c.to_ascii_lowercase()) {
-                return Err(format!("wrong-position letter '{}' is not in the guess", c as char));
+        }
+        for k in 0..26 {
+            if listed[k] == 0 {
+                continue;
             }
-            if self.out_letters[idx(c)] {
-                return Err(format!("'{}' was previously marked absent", c as char));
+            let c = (b'A' + k as u8) as char;
+            if ungreen[k] == 0 {
+                return Err(format!("wrong-position letter '{c}' is not in the guess"));
+            }
+            if listed[k] > ungreen[k] {
+                return Err(format!(
+                    "'{c}' is marked wrong-position {} times but the guess has only {} of it outside the capitals",
+                    listed[k], ungreen[k]
+                ));
+            }
+            if self.max_counts[k] == 0 {
+                return Err(format!("'{c}' was previously marked absent"));
             }
         }
         Ok(())
@@ -197,42 +230,43 @@ impl Solver {
 
     /// Fold one validated guess into the accumulated clues and re-filter.
     fn apply(&mut self, guess: &[u8], wrongs: &[u8]) {
-        // Minimum counts implied by this guess: yellows first, then a bump per
-        // green as we walk the word.
-        let mut this_counts = counts_of(wrongs);
+        // Per letter: how many copies the guess spends, and how many of those the
+        // clue proved are in the answer — one per green, one per yellow (a letter
+        // repeated in `wrongs` counts once per repeat).
+        let spent = counts_of(guess);
+        let mut proved = counts_of(wrongs);
+        for i in 0..self.len {
+            if guess[i].is_ascii_uppercase() {
+                proved[idx(guess[i])] += 1;
+            }
+        }
 
         for i in 0..self.len {
             let c = guess[i];
-            let up = c.to_ascii_uppercase();
             let k = idx(c);
-
             if c.is_ascii_uppercase() {
-                // Green.
-                this_counts[k] += 1;
-                self.correct_positions[i] = Some(up);
+                // Green: this position is pinned to this letter.
+                self.correct_positions[i] = Some(c);
                 self.wrong_positions[i][k] = false;
-                self.in_letters[k] = true;
-            } else if wrongs.iter().any(|&w| w.to_ascii_uppercase() == up) {
-                // Yellow: present, but not here.
-                self.in_letters[k] = true;
-                self.wrong_positions[i][k] = true;
             } else {
-                // Gray: absent.
-                self.out_letters[k] = true;
+                // Not green, so — yellow or gray alike — the answer does not have
+                // this letter *here*; it would have shown green if it did.
+                self.wrong_positions[i][k] = true;
             }
         }
 
-        // A letter that's required somewhere can't also be "absent".
         for k in 0..26 {
-            if self.in_letters[k] {
-                self.out_letters[k] = false;
+            // Every copy the guess spent without proving it is a gray copy, and a
+            // gray copy caps the letter: Wordle only greys a copy once it has run
+            // out of them, so the answer holds exactly `proved[k]`. Zero for a
+            // letter that never lit up, one for the L of "lAbEL", two for the e's
+            // of "eerie ee".
+            if spent[k] > proved[k] && proved[k] < self.max_counts[k] {
+                self.max_counts[k] = proved[k];
             }
-        }
-
-        // Raise the running minimum counts.
-        for k in 0..26 {
-            if this_counts[k] > self.total_counts[k] {
-                self.total_counts[k] = this_counts[k];
+            // Raise the running minimum count.
+            if proved[k] > self.total_counts[k] {
+                self.total_counts[k] = proved[k];
             }
         }
 
@@ -244,14 +278,11 @@ impl Solver {
             let wc = counts_of(w);
 
             for k in 0..26 {
-                if self.out_letters[k] && wc[k] > 0 {
-                    return false; // contains an absent letter
-                }
-                if self.in_letters[k] && wc[k] == 0 {
-                    return false; // missing a required letter
-                }
                 if wc[k] < self.total_counts[k] {
                     return false; // not enough copies of a letter
+                }
+                if wc[k] > self.max_counts[k] {
+                    return false; // too many copies (0 = an absent letter)
                 }
             }
 
